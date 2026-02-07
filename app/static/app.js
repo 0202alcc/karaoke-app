@@ -6,6 +6,16 @@ const HARMONIC_COUNT = 8;
 const SUBHARMONIC_COUNT = 2;
 const DEFAULT_CENTER_FREQ = 440;
 const DEFAULT_OCTAVE_SPAN = 3;
+const PITCH_CONFIDENCE_THRESHOLD = 0.25;
+const PITCH_HISTORY_SIZE = 7;
+const PITCH_MIN_HISTORY = 3;
+const PITCH_UPDATE_HZ = 12;
+const PITCH_DEADBAND_SEMITONES = 0.25;
+const PITCH_MAX_STEP_SEMITONES = 2;
+const PITCH_CENTER_SMOOTHING = 0.2;
+const MIC_MIN_DB = -85;
+const MIC_MAX_DB = -25;
+const MIC_SHAPE_GAMMA = 0.6;
 
 const canvas = document.getElementById("viz");
 const ctx = canvas.getContext("2d");
@@ -39,6 +49,8 @@ let lastDragY = 0;
 let lastFrameTime = 0;
 let lastTimestamp = 0;
 let isAnimating = false;
+let lastCenterUpdateTime = 0;
+const pitchHistory = [];
 
 function resize() {
   pixelRatio = window.devicePixelRatio || 1;
@@ -95,6 +107,25 @@ function midiToLabel(midi) {
   const note = names[(midi + 1200) % 12];
   const octave = Math.floor(midi / 12) - 1;
   return `${note}${octave}`;
+}
+
+function semitoneDelta(freqA, freqB) {
+  return 12 * Math.log2(freqA / freqB);
+}
+
+function median(values) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+  return sorted[mid];
+}
+
+function getMedianPitch() {
+  if (pitchHistory.length < PITCH_MIN_HISTORY) return null;
+  return median(pitchHistory);
 }
 
 function drawGrid() {
@@ -240,9 +271,13 @@ function drawSpectrumShape() {
   for (let i = 0; i < len; i++) {
     const shiftedIndex = (i + shift + len) % len;
     const x = (i / (len - 1)) * (w - pad * 2) + pad;
-    const magnitude = Math.max(-100, freqData[shiftedIndex]);
-    const norm = (magnitude + 100) / 100;
-    const yOffset = Math.max(4, h * 0.05);
+    const magnitude = Math.min(
+      MIC_MAX_DB,
+      Math.max(MIC_MIN_DB, freqData[shiftedIndex])
+    );
+    let norm = (magnitude - MIC_MIN_DB) / (MIC_MAX_DB - MIC_MIN_DB);
+    norm = Math.pow(Math.max(0, Math.min(1, norm)), MIC_SHAPE_GAMMA);
+    const yOffset = Math.max(2, h * 0.03);
     const y = h - (norm * (h - pad * 2) + pad) - yOffset;
     if (i === 0) micCtx.moveTo(x, y);
     else micCtx.lineTo(x, y);
@@ -303,6 +338,12 @@ function autoCorrelate(buffer, sampleRate) {
 
   if (maxPos === -1) return null;
 
+  const zeroLag = correlations[0] || 1;
+  const confidence = maxVal / zeroLag;
+  if (!Number.isFinite(confidence) || confidence < PITCH_CONFIDENCE_THRESHOLD) {
+    return null;
+  }
+
   const peak = maxPos;
   const xp = correlations[peak - 1] || 0;
   const yp = correlations[peak];
@@ -310,7 +351,7 @@ function autoCorrelate(buffer, sampleRate) {
   const shift = (zp - xp) / (2 * (2 * yp - zp - xp) || 1);
   const period = peak + shift;
   if (period <= 0) return null;
-  return sampleRate / period;
+  return { freq: sampleRate / period, confidence };
 }
 
 function animate(timestamp) {
@@ -325,18 +366,38 @@ function animate(timestamp) {
     analyser.getFloatTimeDomainData(timeData);
     analyser.getFloatFrequencyData(freqData);
 
-    const pitch = autoCorrelate(timeData, audioContext.sampleRate);
-    if (pitch) {
-      centerFreq = centerFreq * 0.85 + pitch * 0.15;
-      const midi = frequencyToMidi(pitch);
+    const result = autoCorrelate(timeData, audioContext.sampleRate);
+    if (result) {
+      const pitch = result.freq;
+      pitchHistory.push(pitch);
+      if (pitchHistory.length > PITCH_HISTORY_SIZE) pitchHistory.shift();
+
+      const medianPitch = getMedianPitch() || pitch;
+      const displayPitch = medianPitch;
+
+      if (lastTimestamp - lastCenterUpdateTime >= 1 / PITCH_UPDATE_HZ) {
+        lastCenterUpdateTime = lastTimestamp;
+        const delta = Math.abs(semitoneDelta(displayPitch, centerFreq));
+        if (delta > PITCH_DEADBAND_SEMITONES) {
+          const centerLog = Math.log2(centerFreq);
+          const targetLog = Math.log2(displayPitch);
+          const deltaLog = targetLog - centerLog;
+          const maxStepLog = PITCH_MAX_STEP_SEMITONES / 12;
+          const clampedDelta = Math.max(-maxStepLog, Math.min(maxStepLog, deltaLog));
+          const stepLog = clampedDelta * PITCH_CENTER_SMOOTHING;
+          centerFreq = Math.pow(2, centerLog + stepLog);
+        }
+      }
+
+      const midi = frequencyToMidi(displayPitch);
       noteEl.textContent = midiToLabel(midi);
-      freqEl.textContent = `${pitch.toFixed(1)} Hz`;
+      freqEl.textContent = `${displayPitch.toFixed(1)} Hz`;
+      addPitchBars(displayPitch, lastTimestamp);
     } else {
+      pitchHistory.length = 0;
       noteEl.textContent = "—";
       freqEl.textContent = "0 Hz";
     }
-
-    addPitchBars(pitch, lastTimestamp);
   }
 
   renderHistory(lastTimestamp);
@@ -362,7 +423,7 @@ async function startAudio() {
   await audioContext.resume();
   analyser = audioContext.createAnalyser();
   analyser.fftSize = 4096;
-  analyser.smoothingTimeConstant = 0.85;
+  analyser.smoothingTimeConstant = 0.6;
 
   const bufferLength = analyser.fftSize;
   timeData = new Float32Array(bufferLength);
