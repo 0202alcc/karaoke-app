@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b0d11" />
+    <title>Karaoke Pitch PWA</title>
+    <link rel="manifest" href="manifest.webmanifest" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main id="app">
+      <canvas id="viz" aria-label="Pitch graph"></canvas>
+      <canvas id="labels" aria-hidden="true"></canvas>
+
+      <button id="unit-toggle" type="button" aria-label="Toggle units">
+        Hz
+      </button>
+
+      <div id="readout" aria-live="polite">
+        <span id="note">—</span>
+        <span id="freq">0 Hz</span>
+      </div>
+
+      <button id="mic" type="button" aria-label="Toggle microphone">
+        <canvas id="mic-viz" width="120" height="120"></canvas>
+        <span class="mic-icon" aria-hidden="true"></span>
+      </button>
+    </main>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>
